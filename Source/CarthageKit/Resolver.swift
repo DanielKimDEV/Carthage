@@ -5,23 +5,23 @@ import ReactiveSwift
 /// Protocol for resolving acyclic dependency graphs.
 public protocol ResolverProtocol {
 	init(
-		versionsForDependency: @escaping (Dependency) -> SignalProducer<PinnedVersion, CarthageError>,
-		dependenciesForDependency: @escaping (Dependency, PinnedVersion) -> SignalProducer<(Dependency, VersionSpecifier), CarthageError>,
-		resolvedGitReference: @escaping (Dependency, String) -> SignalProducer<PinnedVersion, CarthageError>
+		specifiersForDependency: @escaping (Dependency) -> SignalProducer<ResolvedSpecifier, CarthageError>,
+		dependenciesForDependency: @escaping (Dependency, ResolvedSpecifier) -> SignalProducer<(Dependency, Specifier), CarthageError>,
+		resolvedGitReference: @escaping (Dependency, ResolvedSpecifier) -> SignalProducer<ResolvedSpecifier, CarthageError>
 	)
 
 	func resolve(
-		dependencies: [Dependency: VersionSpecifier],
-		lastResolved: [Dependency: PinnedVersion]?,
+		dependencies: [Dependency: Specifier],
+		lastResolved: [Dependency: ResolvedSpecifier]?,
 		dependenciesToUpdate: [String]?
-	) -> SignalProducer<[Dependency: PinnedVersion], CarthageError>
+	) -> SignalProducer<[Dependency: ResolvedSpecifier], CarthageError>
 }
 
 /// Responsible for resolving acyclic dependency graphs.
 public struct Resolver: ResolverProtocol {
-	private let versionsForDependency: (Dependency) -> SignalProducer<PinnedVersion, CarthageError>
-	private let resolvedGitReference: (Dependency, String) -> SignalProducer<PinnedVersion, CarthageError>
-	private let dependenciesForDependency: (Dependency, PinnedVersion) -> SignalProducer<(Dependency, VersionSpecifier), CarthageError>
+	private let specifiersForDependency: (Dependency) -> SignalProducer<ResolvedSpecifier, CarthageError>
+	private let resolvedGitReference: (Dependency, ResolvedSpecifier) -> SignalProducer<ResolvedSpecifier, CarthageError>
+	private let dependenciesForDependency: (Dependency, ResolvedSpecifier) -> SignalProducer<(Dependency, Specifier), CarthageError>
 
 	/// Instantiates a dependency graph resolver with the given behaviors.
 	///
@@ -32,11 +32,11 @@ public struct Resolver: ResolverProtocol {
 	/// resolvedGitReference - Resolves an arbitrary Git reference to the
 	///                        latest object.
 	public init(
-		versionsForDependency: @escaping (Dependency) -> SignalProducer<PinnedVersion, CarthageError>,
-		dependenciesForDependency: @escaping (Dependency, PinnedVersion) -> SignalProducer<(Dependency, VersionSpecifier), CarthageError>,
-		resolvedGitReference: @escaping (Dependency, String) -> SignalProducer<PinnedVersion, CarthageError>
+		specifiersForDependency: @escaping (Dependency) -> SignalProducer<ResolvedSpecifier, CarthageError>,
+		dependenciesForDependency: @escaping (Dependency, ResolvedSpecifier) -> SignalProducer<(Dependency, Specifier), CarthageError>,
+		resolvedGitReference: @escaping (Dependency, ResolvedSpecifier) -> SignalProducer<ResolvedSpecifier, CarthageError>
 	) {
-		self.versionsForDependency = versionsForDependency
+		self.specifiersForDependency = specifiersForDependency
 		self.dependenciesForDependency = dependenciesForDependency
 		self.resolvedGitReference = resolvedGitReference
 	}
@@ -46,8 +46,8 @@ public struct Resolver: ResolverProtocol {
 	///
 	/// Sends a dictionary with each dependency and its resolved version.
 	public func resolve(
-		dependencies: [Dependency: VersionSpecifier],
-		lastResolved: [Dependency: PinnedVersion]? = nil,
+		dependencies: [Dependency: Specifier],
+		lastResolved: [Dependency: ResolvedSpecifier]? = nil,
 		dependenciesToUpdate: [String]? = nil
 	) -> SignalProducer<[Dependency: PinnedVersion], CarthageError> {
 		return graphs(for: dependencies, dependencyOf: nil, basedOnGraph: DependencyGraph())
@@ -102,24 +102,24 @@ public struct Resolver: ResolverProtocol {
 	/// `dependencies`. Each array represents one possible permutation of those
 	/// dependencies (chosen from among the versions that actually exist for
 	/// each).
-	private func nodePermutations(for dependencies: [Dependency: VersionSpecifier]) -> SignalProducer<[DependencyNode], CarthageError> {
+	private func nodePermutations(for dependencies: [Dependency: Specifier]) -> SignalProducer<[DependencyNode], CarthageError> {
 		let scheduler = QueueScheduler(qos: .default, name: "org.carthage.CarthageKit.Resolver.nodePermutations")
 
 		return SignalProducer(dependencies)
 			.map { dependency -> SignalProducer<DependencyNode, CarthageError> in
-				return SignalProducer<(key: Dependency, value: VersionSpecifier), CarthageError>(value: dependency)
-					.flatMap(.concat) { dependency -> SignalProducer<PinnedVersion, CarthageError> in
+				return SignalProducer<(key: Dependency, value: Specifier), CarthageError>(value: dependency)
+					.flatMap(.concat) { dependency -> SignalProducer<ResolvedSpecifier, CarthageError> in
 						if case let .gitReference(refName) = dependency.value {
 							return self.resolvedGitReference(dependency.key, refName)
 						}
 
 						return self
-							.versionsForDependency(dependency.key)
-							.filter { dependency.value.isSatisfied(by: $0) }
+							.specifiersForDependency(dependency.key)
+							.filter { dependency.value.isSatisfied(by: $0.version) }
 					}
 					.start(on: scheduler)
 					.observe(on: scheduler)
-					.map { DependencyNode(dependency: dependency.key, proposedVersion: $0, versionSpecifier: dependency.value) }
+					.map { DependencyNode(dependency: dependency.key, proposedVersion: $0.version, specifier: dependency.value) }
 					.collect()
 					.map { $0.sorted() }
 					.flatMap(.concat) { nodes -> SignalProducer<DependencyNode, CarthageError> in
@@ -484,7 +484,7 @@ private final class DependencyNode {
 	///
 	/// This specifier may change as the graph is added to, and the requirements
 	/// become more stringent.
-	var versionSpecifier: VersionSpecifier
+	var specifier: Specifier
 
 	/// The dependencies of this node.
 	var dependencies: Set<DependencyNode> = []
@@ -494,12 +494,12 @@ private final class DependencyNode {
 		return (dependency, proposedVersion)
 	}
 
-	init(dependency: Dependency, proposedVersion: PinnedVersion, versionSpecifier: VersionSpecifier) {
-		precondition(versionSpecifier.isSatisfied(by: proposedVersion))
+	init(dependency: Dependency, proposedVersion: PinnedVersion, specifier: Specifier) {
+		precondition(specifier.versionSpecifier.isSatisfied(by: proposedVersion))
 
 		self.dependency = dependency
 		self.proposedVersion = proposedVersion
-		self.versionSpecifier = versionSpecifier
+		self.apecifier = specifier
 	}
 }
 

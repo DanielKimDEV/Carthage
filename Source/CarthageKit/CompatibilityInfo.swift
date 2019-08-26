@@ -3,7 +3,7 @@ import Result
 
 /// Identifies a dependency, its pinned version, and its compatible and incompatible requirements
 public struct CompatibilityInfo: Equatable {
-	public typealias Requirements = [Dependency: [Dependency: VersionSpecifier]]
+	public typealias Requirements = [Dependency: [Dependency: Specifier]]
 
 	/// The dependency
 	public let dependency: Dependency
@@ -12,22 +12,22 @@ public struct CompatibilityInfo: Equatable {
 	public let pinnedVersion: PinnedVersion
 
 	/// Requirements with which the pinned version of this dependency may or may not be compatible
-	private let requirements: [Dependency: VersionSpecifier]
+	private let requirements: [Dependency: Specifier]
 
-	public init(dependency: Dependency, pinnedVersion: PinnedVersion, requirements: [Dependency: VersionSpecifier]) {
+	public init(dependency: Dependency, pinnedVersion: PinnedVersion, requirements: [Dependency: Specifier]) {
 		self.dependency = dependency
 		self.pinnedVersion = pinnedVersion
 		self.requirements = requirements
 	}
 
 	/// Requirements which are compatible with the pinned version of this dependency
-	public var compatibleRequirements: [Dependency: VersionSpecifier] {
-		return requirements.filter { _, version in version.isSatisfied(by: pinnedVersion) }
+	public var compatibleRequirements: [Dependency: Specifier] {
+		return requirements.filter { _, specifier in specifier.versionSpecifier.isSatisfied(by: pinnedVersion) }
 	}
 
 	/// Requirements which are not compatible with the pinned version of this dependency
-	public var incompatibleRequirements: [Dependency: VersionSpecifier] {
-		return requirements.filter { _, version in !version.isSatisfied(by: pinnedVersion) }
+	public var incompatibleRequirements: [Dependency: Specifier] {
+		return requirements.filter { _, specifier in !specifier.versionSpecifier.isSatisfied(by: pinnedVersion) }
 	}
 
 	/// Accepts a dictionary which maps a dependency to the pinned versions of the dependencies it requires.

@@ -119,7 +119,7 @@ public final class Project { // swiftlint:disable:this type_body_length
 		self.directoryURL = directoryURL
 	}
 
-	private typealias CachedVersions = [Dependency: [PinnedVersion]]
+	private typealias CachedVersions = [Dependency: [PinnedSpecifier]]
 	private typealias CachedBinaryProjects = [URL: BinaryProject]
 
 	/// Caches versions to avoid expensive lookups, and unnecessary
@@ -256,38 +256,40 @@ public final class Project { // swiftlint:disable:this type_body_length
 	///
 	/// This will automatically clone or fetch the project's repository as
 	/// necessary.
-	private func versions(for dependency: Dependency) -> SignalProducer<PinnedVersion, CarthageError> {
-		let fetchVersions: SignalProducer<PinnedVersion, CarthageError>
+    private func versions(for dependency: Dependency, platformSpecifier: CarthagePlatformSpecifier) -> SignalProducer<PinnedSpecifier, CarthageError> {
+		let fetchVersions: SignalProducer<PinnedSpecifier, CarthageError>
 
 		switch dependency {
 		case .git, .gitHub:
 			fetchVersions = cloneOrFetchDependency(dependency)
 				.flatMap(.merge) { repositoryURL in listTags(repositoryURL) }
-				.map { PinnedVersion($0) }
+				.map { PinnedSpecifier(version: PinnedVersion($0), platformSpecifier: platformSpecifier) }
 
 		case let .binary(binary):
 			fetchVersions = downloadBinaryFrameworkDefinition(binary: binary)
-				.flatMap(.concat) { binaryProject -> SignalProducer<PinnedVersion, CarthageError> in
-					return SignalProducer(binaryProject.versions.keys)
+				.flatMap(.concat) { binaryProject -> SignalProducer<PinnedSpecifier, CarthageError> in
+                    return SignalProducer( binaryProject.versions.keys.map({ (version) -> PinnedSpecifier in
+                        PinnedSpecifier(version: version, platformSpecifier: platformSpecifier)
+                    }))
 				}
 		}
 
 		return SignalProducer<Project.CachedVersions, CarthageError>(value: self.cachedVersions)
-			.flatMap(.merge) { versionsByDependency -> SignalProducer<PinnedVersion, CarthageError> in
-				if let versions = versionsByDependency[dependency] {
-					return SignalProducer(versions)
+			.flatMap(.merge) { specifiersByDependency -> SignalProducer<PinnedSpecifier, CarthageError> in
+				if let specifiers = specifiersByDependency[dependency] {
+					return SignalProducer(specifiers)
 				} else {
 					return fetchVersions
 						.collect()
-						.on(value: { newVersions in
-							self.cachedVersions[dependency] = newVersions
+						.on(value: { newSpecifiers in
+							self.cachedVersions[dependency] = newSpecifiers
 						})
-						.flatMap(.concat) { versions in SignalProducer<PinnedVersion, CarthageError>(versions) }
+						.flatMap(.concat) { specifiers in SignalProducer<PinnedSpecifier, CarthageError>(specifiers) }
 				}
 			}
 			.startOnQueue(cachedVersionsQueue)
 			.collect()
-			.flatMap(.concat) { versions -> SignalProducer<PinnedVersion, CarthageError> in
+			.flatMap(.concat) { versions -> SignalProducer<PinnedSpecifier, CarthageError> in
 				if versions.isEmpty {
 					return SignalProducer(error: .taggedVersionNotFound(dependency))
 				}
@@ -297,8 +299,8 @@ public final class Project { // swiftlint:disable:this type_body_length
 	}
 
 	/// Produces the sub dependencies of the given dependency. Uses the checked out directory if able
-	private func dependencySet(for dependency: Dependency, version: PinnedVersion) -> SignalProducer<Set<Dependency>, CarthageError> {
-		return self.dependencies(for: dependency, version: version, tryCheckoutDirectory: true)
+	private func dependencySet(for dependency: Dependency, specifier: ResolvedSpecifier) -> SignalProducer<Set<Dependency>, CarthageError> {
+		return self.dependencies(for: dependency, specifier: specifier, tryCheckoutDirectory: true)
 			.map { $0.0 }
 			.collect()
 			.map { Set($0) }
@@ -307,19 +309,19 @@ public final class Project { // swiftlint:disable:this type_body_length
 	}
 
 	/// Loads the dependencies for the given dependency, at the given version.
-	private func dependencies(for dependency: Dependency, version: PinnedVersion) -> SignalProducer<(Dependency, VersionSpecifier), CarthageError> {
-		return self.dependencies(for: dependency, version: version, tryCheckoutDirectory: false)
+	private func dependencies(for dependency: Dependency, specifier: ResolvedSpecifier) -> SignalProducer<(Dependency, Specifier), CarthageError> {
+		return self.dependencies(for: dependency, specifier: specifier, tryCheckoutDirectory: false)
 	}
 
 	/// Loads the dependencies for the given dependency, at the given version. Optionally can attempt to read from the Checkout directory
 	private func dependencies(
 		for dependency: Dependency,
-		version: PinnedVersion,
+		specifier: ResolvedSpecifier,
 		tryCheckoutDirectory: Bool
-	) -> SignalProducer<(Dependency, VersionSpecifier), CarthageError> {
+	) -> SignalProducer<(Dependency, Specifier), CarthageError> {
 		switch dependency {
 		case .git, .gitHub:
-			let revision = version.commitish
+			let revision = specifier.version.commitish
 			let cartfileFetch: SignalProducer<Cartfile, CarthageError> = self.cloneOrFetchDependency(dependency, commitish: revision)
 				.flatMap(.concat) { repositoryURL in
 					return contentsOfFileInRepository(repositoryURL, Constants.Project.cartfilePath, revision: revision)
@@ -347,7 +349,7 @@ public final class Project { // swiftlint:disable:this type_body_length
 				cartfileSource = cartfileFetch
 			}
 			return cartfileSource
-				.flatMap(.concat) { cartfile -> SignalProducer<(Dependency, VersionSpecifier), CarthageError> in
+				.flatMap(.concat) { cartfile -> SignalProducer<(Dependency, Specifier), CarthageError> in
 					return SignalProducer(cartfile.dependencies.map { ($0.0, $0.1) })
 				}
 
@@ -363,14 +365,14 @@ public final class Project { // swiftlint:disable:this type_body_length
 		resolvedCartfile: ResolvedCartfile
 	) -> SignalProducer<[String], CarthageError> {
 		return SignalProducer(value: resolvedCartfile)
-			.map { resolvedCartfile -> [(Dependency, PinnedVersion)] in
+			.map { resolvedCartfile -> [(Dependency, ResolvedSpecifier)] in
 				return resolvedCartfile.dependencies
 					.filter { dep, _ in dependenciesToCheckout?.contains(dep.name) ?? false }
 			}
-			.flatMap(.merge) { dependencies -> SignalProducer<[String], CarthageError> in
-				return SignalProducer<(Dependency, PinnedVersion), CarthageError>(dependencies)
-					.flatMap(.merge) { dependency, version -> SignalProducer<(Dependency, VersionSpecifier), CarthageError> in
-						return self.dependencies(for: dependency, version: version)
+            .flatMap(.merge) { dependencies -> SignalProducer<[ResolvedSpecifier], CarthageError> in
+				return SignalProducer<(Dependency, ResolvedSpecifier), CarthageError>(dependencies)
+					.flatMap(.merge) { dependency, specifier -> SignalProducer<(Dependency, ResolvedSpecifier), CarthageError> in
+						return self.dependencies(for: dependency, specifier: specifier)
 					}
 					.map { $0.0.name }
 					.collect()
@@ -383,8 +385,8 @@ public final class Project { // swiftlint:disable:this type_body_length
 		tryCheckoutDirectory: Bool
 	) -> SignalProducer<CompatibilityInfo.Requirements, CarthageError> {
 		return SignalProducer(resolvedCartfile.dependencies)
-			.flatMap(.concurrent(limit: 4)) { dependency, pinnedVersion -> SignalProducer<(Dependency, (Dependency, VersionSpecifier)), CarthageError> in
-				return self.dependencies(for: dependency, version: pinnedVersion, tryCheckoutDirectory: tryCheckoutDirectory)
+			.flatMap(.concurrent(limit: 4)) { dependency, specifier -> SignalProducer<(Dependency, (Dependency, Specifier)), CarthageError> in
+				return self.dependencies(for: dependency, specifier: specifier, tryCheckoutDirectory: tryCheckoutDirectory)
 					.map { (dependency, $0) }
 			}
 			.collect()
@@ -449,8 +451,8 @@ public final class Project { // swiftlint:disable:this type_body_length
 	///
 	/// This will fetch dependency repositories as necessary, but will not check
 	/// them out into the project's working directory.
-	private func latestDependencies(resolver: ResolverProtocol) -> SignalProducer<[Dependency: PinnedVersion], CarthageError> {
-		func resolve(prefersGitReference: Bool) -> SignalProducer<[Dependency: PinnedVersion], CarthageError> {
+	private func latestDependencies(resolver: ResolverProtocol) -> SignalProducer<[Dependency: ResolvedSpecifier], CarthageError> {
+		func resolve(prefersGitReference: Bool) -> SignalProducer<[Dependency: ResolvedSpecifier], CarthageError> {
 			return SignalProducer
 				.combineLatest(loadCombinedCartfile(), loadResolvedCartfile())
 				.map { cartfile, resolvedCartfile in

@@ -9,9 +9,9 @@ public struct Cartfile {
 	static let commentIndicator = "#"
 
 	/// The dependencies listed in the Cartfile.
-	public var dependencies: [Dependency: VersionSpecifier]
+	public var dependencies: [Dependency: Specifier]
 
-	public init(dependencies: [Dependency: VersionSpecifier] = [:]) {
+	public init(dependencies: [Dependency: Specifier] = [:]) {
 		self.dependencies = dependencies
 	}
 
@@ -23,7 +23,7 @@ public struct Cartfile {
 
 	/// Attempts to parse Cartfile information from a string.
 	public static func from(string: String) -> Result<Cartfile, CarthageError> {
-		var dependencies: [Dependency: VersionSpecifier] = [:]
+		var dependencies: [Dependency: Specifier] = [:]
 		var duplicates: [Dependency] = []
 		var result: Result<(), CarthageError> = .success(())
 
@@ -64,9 +64,15 @@ public struct Cartfile {
 					stop = true
 					return
 				}
+                let platformSpecifier = CarthagePlatformSpecifier.from(scannerWithoutComments)
+                if case let .failure(error) = platformSpecifier {
+                    result = .failure(CarthageError(scannableError: error))
+                    stop = true
+                    return
+                }
 
 				if dependencies[dependency] == nil {
-					dependencies[dependency] = version
+					dependencies[dependency] = Specifier(versionSpecifier: version, platformSpecifier: try! platformSpecifier.get())
 				} else {
 					duplicates.append(dependency)
 				}
@@ -129,9 +135,9 @@ public func duplicateDependenciesIn(_ cartfile1: Cartfile, _ cartfile2: Cartfile
 /// checked out for each dependency.
 public struct ResolvedCartfile {
 	/// The dependencies listed in the Cartfile.resolved.
-	public var dependencies: [Dependency: PinnedVersion]
+	public var dependencies: [Dependency: ResolvedSpecifier]
 
-	public init(dependencies: [Dependency: PinnedVersion]) {
+	public init(dependencies: [Dependency: ResolvedSpecifier]) {
 		self.dependencies = dependencies
 	}
 
@@ -150,7 +156,12 @@ public struct ResolvedCartfile {
 		scannerLoop: while !scanner.isAtEnd {
 			switch Dependency.from(scanner).fanout(PinnedVersion.from(scanner)) {
 			case let .success((dep, version)):
-				cartfile.dependencies[dep] = version
+                let platformSpecifier = CarthagePlatformSpecifier.from(scanner)
+                if case let .failure(error) = platformSpecifier {
+                    result = .failure(CarthageError(scannableError: error))
+                    break scannerLoop
+                }
+                cartfile.dependencies[dep] = ResolvedSpecifier(version: version, platformSpecifier: try! platformSpecifier.get())
 
 			case let .failure(error):
 				result = .failure(CarthageError(scannableError: error))

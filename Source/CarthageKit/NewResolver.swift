@@ -4,9 +4,9 @@ import ReactiveSwift
 
 /// Responsible for resolving acyclic dependency graphs.
 public struct NewResolver: ResolverProtocol {
-	private let versionsForDependency: (Dependency) -> SignalProducer<PinnedVersion, CarthageError>
-	private let resolvedGitReference: (Dependency, String) -> SignalProducer<PinnedVersion, CarthageError>
-	private let dependenciesForDependency: (Dependency, PinnedVersion) -> SignalProducer<(Dependency, VersionSpecifier), CarthageError>
+	private let specifiersForDependency: (Dependency) -> SignalProducer<ResolvedSpecifier, CarthageError>
+	private let resolvedGitReference: (Dependency, String) -> SignalProducer<ResolvedSpecifier, CarthageError>
+	private let dependenciesForDependency: (Dependency, ResolvedSpecifier) -> SignalProducer<(Dependency, Specifier), CarthageError>
 
 	/// Instantiates a dependency graph resolver with the given behaviors.
 	///
@@ -17,11 +17,11 @@ public struct NewResolver: ResolverProtocol {
 	/// resolvedGitReference - Resolves an arbitrary Git reference to the
 	///                        latest object.
 	public init(
-		versionsForDependency: @escaping (Dependency) -> SignalProducer<PinnedVersion, CarthageError>,
-		dependenciesForDependency: @escaping (Dependency, PinnedVersion) -> SignalProducer<(Dependency, VersionSpecifier), CarthageError>,
-		resolvedGitReference: @escaping (Dependency, String) -> SignalProducer<PinnedVersion, CarthageError>
+        specifiersForDependency: @escaping (Dependency) -> SignalProducer<ResolvedSpecifier, CarthageError>,
+		dependenciesForDependency: @escaping (Dependency, ResolvedSpecifier) -> SignalProducer<(Dependency, Specifier), CarthageError>,
+		resolvedGitReference: @escaping (Dependency, String) -> SignalProducer<ResolvedSpecifier, CarthageError>
 	) {
-		self.versionsForDependency = versionsForDependency
+		self.specifiersForDependency = specifiersForDependency
 		self.dependenciesForDependency = dependenciesForDependency
 		self.resolvedGitReference = resolvedGitReference
 	}
@@ -31,10 +31,10 @@ public struct NewResolver: ResolverProtocol {
 	///
 	/// Sends a dictionary with each dependency and its resolved version.
 	public func resolve(
-		dependencies: [Dependency: VersionSpecifier],
-		lastResolved: [Dependency: PinnedVersion]? = nil,
+		dependencies: [Dependency: Specifier],
+		lastResolved: [Dependency: ResolvedSpecifier]? = nil,
 		dependenciesToUpdate: [String]? = nil
-		) -> SignalProducer<[Dependency: PinnedVersion], CarthageError> {
+		) -> SignalProducer<[Dependency: ResolvedSpecifier], CarthageError> {
 		let result = process(dependencies: dependencies, in: DependencyGraph(whitelist: dependenciesToUpdate, lastResolved: lastResolved))
 			.map { graph in graph.versions }
 
@@ -51,26 +51,26 @@ public struct NewResolver: ResolverProtocol {
 	/// represents one possible permutation of those dependencies
 	/// (chosen from among the versions that actually exist for each).
 	private func nodePermutations(
-		for dependencies: [Dependency: VersionSpecifier],
+		for dependencies: [Dependency: Specifier],
 		in baseGraph: DependencyGraph,
 		withParent parentNode: DependencyNode?
 		) -> Result<NodePermutations, CarthageError> {
-		return SignalProducer<(key: Dependency, value: VersionSpecifier), CarthageError>(dependencies)
+		return SignalProducer<(key: Dependency, value: Specifier), CarthageError>(dependencies)
 			.flatMap(.concat) { dependency, specifier -> SignalProducer<[DependencyNode], CarthageError> in
 				let versionProducer: SignalProducer<PinnedVersion, CarthageError>
-				if case let .gitReference(refName) = specifier {
+				if case let .gitReference(refName) = specifier.versionSpecifier {
 					versionProducer = self.resolvedGitReference(dependency, refName)
 				} else if let existingNode = baseGraph.node(for: dependency) {
 					// We still 'permute' over all dependencies to properly account for the graph edges
 					// but if it has already been pinned, the only possible value is that pinned version
 					versionProducer = SignalProducer(value: existingNode.proposedVersion)
 				} else {
-					versionProducer = self.versionsForDependency(dependency)
+					versionProducer = self.specifiersForDependency(dependency)
 						.filter { specifier.isSatisfied(by: $0) }
 				}
 
 				return versionProducer
-					.map { DependencyNode(dependency: dependency, proposedVersion: $0, versionSpecifier: specifier, parent: parentNode) }
+					.map { DependencyNode(dependency: dependency, proposedVersion: $0, specifier: specifier, parent: parentNode) }
 					.collect()
 					.attemptMap { nodes in
 						guard !nodes.isEmpty else {
@@ -94,7 +94,7 @@ public struct NewResolver: ResolverProtocol {
 	///
 	/// This is a helper method, and not meant to be called from outside.
 	private func process(
-		dependencies: [Dependency: VersionSpecifier],
+		dependencies: [Dependency: Specifier],
 		in baseGraph: DependencyGraph,
 		withParent parent: DependencyNode? = nil
 		) -> Result<DependencyGraph, CarthageError> {
